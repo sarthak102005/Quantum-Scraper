@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 
 # Fix for Windows: Playwright requires ProactorEventLoop to spawn subprocesses.
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -20,6 +22,20 @@ from web.crawler_manager import WebCrawlSession
 
 app = FastAPI(title="Quantum Scraper API", version="1.0")
 
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
+if allowed_origins_env == "*":
+    allowed_origins = ["*"]
+else:
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Store active session globally
 active_session: Optional[WebCrawlSession] = None
 session_lock = asyncio.Lock()
@@ -27,6 +43,10 @@ session_lock = asyncio.Lock()
 class CrawlRequest(BaseModel):
     seed_url: str = Field(..., description="The seed website URL to start crawling from")
     limit: int = Field(50, ge=1, le=5000, description="The maximum number of products to scrape")
+
+@app.get("/health")
+async def health() -> Dict[str, str]:
+    return {"status": "ok"}
 
 @app.post("/api/crawl")
 async def start_crawl(req: CrawlRequest, background_tasks: BackgroundTasks):

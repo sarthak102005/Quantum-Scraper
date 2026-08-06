@@ -472,7 +472,9 @@
         </section>
     </main>
 
+    <script src="./config.js"></script>
     <script>
+        const apiBaseUrl = window.QS_CONFIG?.API_BASE_URL || '';
         const seedUrlInput = document.getElementById('seedUrl');
         const limitInput = document.getElementById('limit');
         const startBtn = document.getElementById('startBtn');
@@ -582,7 +584,7 @@
                 crawlEventSource.close();
             }
 
-            crawlEventSource = new EventSource('/api/crawl/logs');
+            crawlEventSource = new EventSource(`${apiBaseUrl}/api/crawl/logs`);
 
             crawlEventSource.addEventListener('log', (e) => {
                 const data = JSON.parse(e.data);
@@ -636,7 +638,7 @@
             setStatus('running');
 
             try {
-                const response = await fetch('/api/crawl', {
+                const response = await fetch(`${apiBaseUrl}/api/crawl`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ seed_url: seedUrl, limit: limit })
@@ -660,7 +662,7 @@
             setStatus('running');
 
             try {
-                const response = await fetch('/api/crawl/resume', {
+                const response = await fetch(`${apiBaseUrl}/api/crawl/resume`, {
                     method: 'POST'
                 });
 
@@ -678,15 +680,15 @@
         });
 
         downloadBtn.addEventListener('click', () => {
-            window.location.href = '/api/crawl/export';
+            window.location.href = `${apiBaseUrl}/api/crawl/export`;
         });
 
         downloadJsonBtn.addEventListener('click', () => {
-            window.location.href = '/api/crawl/export/json-zip';
+            window.location.href = `${apiBaseUrl}/api/crawl/export/json-zip`;
         });
 
         downloadExcelBtn.addEventListener('click', () => {
-            window.location.href = '/api/crawl/export/excel';
+            window.location.href = `${apiBaseUrl}/api/crawl/export/excel`;
         });
     </script>
 </body>
