@@ -1,0 +1,29 @@
+# Environments
+.venv
+.venv_new
+venv/
+ENV/
+env/
+.env
+
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Project outputs & logs
+outputs/
+logs/
+*.log
+
+# IDEs & System files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Sub-repositories
+Automated-Web-Scraper/

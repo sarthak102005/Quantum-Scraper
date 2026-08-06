@@ -1,0 +1,436 @@
+"""
+autonomous_scraper/agent.py
+
+ADK agent definition for adk web.
+ADK requires a module-level `root_agent` variable of type LlmAgent.
+
+Run with:  adk web .   (from the autonomous-ai-scraper project root)
+"""
+
+from __future__ import annotations
+
+import sys
+import os
+import logging
+from typing import AsyncGenerator
+
+# Ensure the project root is on sys.path so we can import shared/mcps/agents
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+# Load .env from the project root before anything else
+from dotenv import load_dotenv
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+
+from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
+from google.adk.models import BaseLlm, LLMRegistry
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.adk.models.lite_llm import LiteLlm
+
+from agents.planner_agent import (
+    tool_discover,
+    tool_classify_urls,
+    tool_enqueue_urls,
+    tool_get_next_batch,
+    tool_fetch_and_extract,
+    tool_validate_and_store,
+    tool_checkpoint,
+    tool_get_crawl_stats,
+    tool_get_domain_recommendations,
+    tool_finalize_crawl,
+    init_mcps,
+)
+from shared.utils.config import get_config
+
+logger = logging.getLogger("autonomous_scraper.agent")
+
+# ── Custom LLM Providers & Fallback Chain ──────────────────────────────────────
+
+class OpenRouterLlm(LiteLlm):
+    """Enables OpenRouter routing via LiteLlm wrapper."""
+    @classmethod
+    def supported_models(cls) -> list[str]:
+        return ['openrouter/.*']
+
+LLMRegistry.register(OpenRouterLlm)
+
+
+class FallbackLlm(BaseLlm):
+    """Orchestrates model fallback chain for all agent queries:
+    Gemini -> OpenRouter -> Groq (text-only last resort)
+    """
+    @classmethod
+    def supported_models(cls) -> list[str]:
+        return ["fallback-llm"]
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        config = get_config()
+
+        gemini_model = config.llm.gemini_model
+
+        openrouter_model = config.llm.openrouter_model
+        if "/" not in openrouter_model:
+            openrouter_model = f"openrouter/{openrouter_model}"
+
+        groq_model = config.llm.groq_model
+        if not groq_model.startswith("groq/"):
+            groq_model = f"groq/{groq_model}"
+
+        # Gemini is primary; OpenRouter second (supports tool use via auto-routing);
+        # Groq is last resort — it doesn't support ADK tool calling reliably so
+        # we strip all tool/function parts and send text-only context.
+        models_to_try = [
+            ("Gemini", gemini_model, False),
+            ("OpenRouter", openrouter_model, False),
+            ("OpenRouterFree", "openrouter/meta-llama/llama-3.3-70b-instruct:free", False),
+            ("Groq", groq_model, True),   # True = strip tool calls before sending
+        ]
+
+        for name, model_name, strip_tools in models_to_try:
+            try:
+                logger.info("FallbackLlm: Attempting query with %s (%s)", name, model_name)
+                model_impl = LLMRegistry.new_llm(model_name)
+                req = llm_request.model_copy(update={"model": model_name})
+
+                # Sanitize messages for non-Gemini models
+                if name != "Gemini" and hasattr(req, "contents") and req.contents:
+                    from google.genai.types import Content, Part
+                    sanitized_contents = []
+                    for content in req.contents:
+                        clean_parts = []
+                        for part in (content.parts or []):
+                            # Remove reasoning properties recursively that crash non-Gemini APIs
+                            for attr in ["thought", "reasoning_content"]:
+                                if hasattr(part, attr):
+                                    setattr(part, attr, None)
+                                if isinstance(part, dict):
+                                    part.pop(attr, None)
+
+                            if strip_tools:
+                                # Groq: keep only text parts — strip function_call/function_response
+                                if hasattr(part, "text") and part.text:
+                                    clean_parts.append(part)
+                                elif isinstance(part, dict) and part.get("text"):
+                                    clean_parts.append(part)
+                            else:
+                                # OpenRouter: keep text and function parts
+                                if hasattr(part, "text") and part.text:
+                                    clean_parts.append(part)
+                                elif hasattr(part, "function_call") and part.function_call:
+                                    clean_parts.append(part)
+                                elif hasattr(part, "function_response") and part.function_response:
+                                    clean_parts.append(part)
+                                elif isinstance(part, dict) and part.get("text"):
+                                    clean_parts.append(part)
+                        if clean_parts:
+                            sanitized_contents.append(Content(role=content.role, parts=clean_parts))
+                    req.contents = sanitized_contents
+
+                # Force max_tokens to a small size so free API tier does not complain
+                if name != "Gemini":
+                    from google.genai import types as genai_types
+                    req = req.model_copy(update={"max_tokens": 1024})
+                    # Recreate generation config directly inside req.config to override ADK default token counts
+                    req = req.model_copy(update={"config": genai_types.GenerateContentConfig(
+                        max_output_tokens=1024,
+                        temperature=0.7
+                    )})
+
+                # Also strip tools list for Groq (tool schemas cause BadRequestError)
+                if strip_tools and hasattr(req, "tools"):
+                    req = req.model_copy(update={"tools": []})
+                    req = req.model_copy(update={"tool_config": None})
+
+                async for resp in model_impl.generate_content_async(req, stream=stream):
+                    yield resp
+                logger.info("FallbackLlm: Successfully completed turn with %s", name)
+                return
+            except Exception as e:
+                logger.warning("FallbackLlm model failed: %s", e)
+
+        logger.error("FallbackLlm: All models in fallback chain failed! Yielding termination response.")
+
+        from google.genai import types
+        emulated_response = LlmResponse(
+            model_version="local-termination",
+            content=types.Content(role="model", parts=[types.Part(text="All AI models are currently unavailable (rate limit or API error). Please wait a moment and try again.")]),
+            turn_complete=True
+        )
+        yield emulated_response
+        return
+
+
+LLMRegistry.register(FallbackLlm)
+
+
+# ── Lazy MCP initialisation ──────────────────────────────────────────────────
+import asyncio
+
+_initialized = False
+_init_lock = asyncio.Lock()
+
+
+async def _ensure_initialized() -> None:
+    global _initialized
+    if not _initialized:
+        async with _init_lock:
+            if not _initialized:
+                config = get_config()
+                await init_mcps(config)
+                _initialized = True
+
+
+# ── Tool wrappers (ADK calls these as plain async functions) ──────────────────
+
+async def discover(seed_url: str, max_pages: int = 100) -> str:
+    """Discover all URLs on a website starting from seed_url.
+
+    Fetches robots.txt, parses sitemaps, and extracts navigation links.
+    Returns a JSON summary of discovered URLs and website profile.
+
+    Args:
+        seed_url: The starting URL for discovery (e.g. 'https://example.com').
+        max_pages: Maximum number of pages to include in the crawl budget.
+
+    Returns:
+        JSON string with keys: profile_domain, urls_discovered, product_patterns,
+        category_patterns, preferred_fetch_method.
+    """
+    await _ensure_initialized()
+    return await tool_discover(seed_url, max_pages)
+
+
+async def classify_urls(urls_json: str | list | dict) -> str:
+    """Classify a list of URLs into page types (product, category, pagination, unknown).
+
+    Args:
+        urls_json: JSON array or python list of URL strings to classify.
+
+    Returns:
+        JSON string with list of {url, page_type, confidence, priority}.
+    """
+    await _ensure_initialized()
+    
+    # Fail-safe JSON payload parsing
+    import json
+    if isinstance(urls_json, (list, dict)):
+        payload = json.dumps(urls_json)
+    else:
+        payload = str(urls_json)
+        
+    return await tool_classify_urls(payload)
+
+
+async def enqueue_urls(classified_urls_json: str | list | dict) -> str:
+    """Add classified URLs to the crawler queue.
+
+    Args:
+        classified_urls_json: JSON array or python list of classified URL objects from classify_urls.
+
+    Returns:
+        JSON with count of URLs enqueued and current queue stats.
+    """
+    await _ensure_initialized()
+    
+    import json
+    if isinstance(classified_urls_json, (list, dict)):
+        payload = json.dumps(classified_urls_json)
+    else:
+        payload = str(classified_urls_json)
+        
+    return await tool_enqueue_urls(payload)
+
+
+async def get_next_batch(batch_size: int = 5) -> str:
+    """Get the next batch of URLs to process from the crawler queue.
+
+    Args:
+        batch_size: Number of URLs to fetch (default 5).
+
+    Returns:
+        JSON array of URL objects with page_type and priority.
+    """
+    await _ensure_initialized()
+    return await tool_get_next_batch(batch_size)
+
+
+async def fetch_and_extract(url: str, page_type: str = "product") -> str:
+    """Fetch a URL and extract product data from it.
+
+    This tool fetches the page (HTTP or Playwright as needed), then runs
+    the 5-stage extraction pipeline. Use only for product pages.
+
+    Args:
+        url: The URL to fetch and extract from.
+        page_type: Expected page type ('product' recommended).
+
+    Returns:
+        JSON with extraction success, confidence, method, and key product fields.
+    """
+    await _ensure_initialized()
+    return await tool_fetch_and_extract(url, page_type)
+
+
+async def validate_and_store(url: str) -> str:
+    """Validate the last extracted product from a URL and store it if valid.
+
+    Run fetch_and_extract first on the URL, then call this to validate and persist.
+
+    Args:
+        url: The URL of the product page that was previously extracted.
+
+    Returns:
+        JSON with verdict (PASS/WARN/FAIL), quality_score, and storage result.
+    """
+    await _ensure_initialized()
+    return await tool_validate_and_store(url)
+
+
+async def save_checkpoint() -> str:
+    """Save the current crawler queue state to a checkpoint file.
+
+    Call this periodically during long crawls to enable resume on interruption.
+
+    Returns:
+        JSON with checkpoint path and queue statistics.
+    """
+    await _ensure_initialized()
+    return await tool_checkpoint()
+
+
+async def get_crawl_stats() -> str:
+    """Get real-time statistics for the current crawl session.
+
+    Returns:
+        JSON with counts for fetched, extracted, passed, failed, and error metrics.
+    """
+    await _ensure_initialized()
+    return await tool_get_crawl_stats()
+
+
+async def get_domain_recommendations(domain: str) -> str:
+    """Get Knowledge MCP recommendations for scraping a specific domain.
+
+    Use this before starting a crawl to check if we have prior knowledge.
+
+    Args:
+        domain: The domain to get recommendations for (e.g. 'example.com').
+
+    Returns:
+        JSON with preferred_fetch_method, skip_discovery, selector_version,
+        rollback_selector_version recommendations.
+    """
+    await _ensure_initialized()
+    return await tool_get_domain_recommendations(domain)
+
+
+async def finalize_crawl() -> str:
+    """Finalize the crawl: flush storage, update knowledge profile, return summary.
+
+    Call this when the crawl is complete or the budget is exhausted.
+
+    Returns:
+        JSON summary of the completed crawl.
+    """
+    await _ensure_initialized()
+    return await tool_finalize_crawl()
+
+
+async def extract_navigation_routes(domain: str | dict | None = None, **kwargs) -> str:
+    """Parse raw navigation markdown content to extract potential catalog/category routes.
+
+    Use this when discovery yields few URLs or when all candidate URLs in classification
+    are marked unknown to locate category routes to crawl.
+
+    Args:
+        domain: The website domain name (e.g. 'example.com').
+
+    Returns:
+        JSON string listing category/catalog URLs.
+    """
+    await _ensure_initialized()
+    
+    # Fail-safe parameter extraction
+    target_domain = ""
+    if isinstance(domain, dict):
+        target_domain = domain.get("domain", "")
+    elif isinstance(domain, str):
+        target_domain = domain
+    
+    if not target_domain:
+        target_domain = kwargs.get("domain", "")
+        
+    if not target_domain:
+        # Fallback default if not specified
+        target_domain = "unknown"
+
+    from agents.planner_agent import tool_extract_navigation_routes
+    return await tool_extract_navigation_routes(target_domain)
+
+
+async def extract_urls_from_page(url: str) -> str:
+    """Fetch any page (e.g. a category listing page) and extract all hyperlinks found on it.
+
+    Use this when you have a category URL and need to find the child product URLs on that page.
+
+    Args:
+        url: The category or listing page URL.
+
+    Returns:
+        JSON string containing the list of absolute URLs found on the page.
+    """
+    await _ensure_initialized()
+    from agents.planner_agent import tool_extract_urls_from_page
+    return await tool_extract_urls_from_page(url)
+
+
+# ── Build the ADK LlmAgent ────────────────────────────────────────────────────
+
+root_agent = LlmAgent(
+    name="autonomous_scraper_planner",
+    model="fallback-llm",  # Orchestrated fallback chain
+    description=(
+        "Autonomous AI web scraping planner. "
+        "Give it a website URL and it will discover, classify, fetch, "
+        "extract, validate and store product data for you."
+    ),
+    instruction="""You are an autonomous AI e-commerce scraping planner.
+
+To scrape any website with 100% accuracy, you must locate products by navigating its menu/navbar hierarchy rather than relying on URL regex patterns.
+
+When you receive a scraping request, execute this workflow:
+1. Call `get_domain_recommendations` to check prior knowledge and details about the domain.
+2. Call `discover` to fetch the homepage, build the navigation markdown menu structure, and extract sitemaps.
+   * NOTE: The `discover` tool automatically parses sitemaps and enqueues all discovered URLs (e.g., thousands of URLs) directly into the background queue database. You do NOT need to request additional discoveries or manually parse the 'sample_urls' list returned by it.
+3. Immediately call `get_next_batch` to retrieve the first batch of URLs that `discover` loaded into the queue.
+4. Call `classify_urls` on the batch of URLs returned from `get_next_batch`.
+5. Call `enqueue_urls` to update their page types (e.g., mark category/subcategory/product priority rules) in the queue.
+6. If the queue batch has category URLs but no product URLs:
+   - Select a category URL and call `extract_urls_from_page` to retrieve all hyperlinks from that category page.
+   - Run `classify_urls` on those newly extracted URLs and then `enqueue_urls` them.
+7. For each URL in the batch determined to be a 'product':
+   - Call `fetch_and_extract` to run the 5-stage extraction pipeline.
+   - Call `validate_and_store` to validate the extracted product and save it.
+8. Call `get_next_batch` again to fetch the next batch. Repeat this loop until you have successfully scraped the user's requested number of products.
+9. Once the quota is reached, call `finalize_crawl` and present the summary to the user.
+""",
+    tools=[
+        FunctionTool(discover),
+        FunctionTool(classify_urls),
+        FunctionTool(enqueue_urls),
+        FunctionTool(get_next_batch),
+        FunctionTool(fetch_and_extract),
+        FunctionTool(validate_and_store),
+        FunctionTool(save_checkpoint),
+        FunctionTool(get_crawl_stats),
+        FunctionTool(get_domain_recommendations),
+        FunctionTool(finalize_crawl),
+        FunctionTool(extract_navigation_routes),
+        FunctionTool(extract_urls_from_page),
+    ],
+)

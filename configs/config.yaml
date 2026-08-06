@@ -1,0 +1,59 @@
+# autonomous-ai-scraper/configs/config.yaml
+
+concurrency:
+  max_requests_per_domain: 3
+  global_max_requests: 10
+  browser_instance_limit: 2
+
+delays:
+  min_ms: 500
+  max_ms: 2000
+  jitter: true
+
+retries:
+  max_attempts: 3
+  backoff_factor: 2.0
+
+browser:
+  headless: true
+  timeout_ms: 30000
+  wait_for_selector: null
+
+cache:
+  enabled: true
+  ttl_seconds: 3600
+  max_size_mb: 100
+
+output:
+  formats: [csv, json, sqlite]
+  directory: outputs/
+  streaming: true
+
+llm:
+  primary: gemini
+  fallback: [groq, openrouter]
+  extraction_fallback_enabled: false
+  gemini_model: gemini-2.5-flash
+  groq_model: llama-3.3-70b-versatile
+  openrouter_model: tencent/hy3:free
+
+
+proxies:
+  enabled: false
+  pool: []
+  rotation: random
+
+knowledge:
+  db_path: outputs/knowledge.db
+  profile_ttl_days: 7
+
+classification:
+  threshold: 60
+
+logging:
+  level: INFO
+  format: json
+  output: logs/crawl.log
+
+crawl_scope:
+  policy: seed_path

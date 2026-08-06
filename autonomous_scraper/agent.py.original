@@ -1,0 +1,338 @@
+"""
+autonomous_scraper/agent.py
+
+ADK agent definition for adk web.
+ADK requires a module-level `root_agent` variable of type LlmAgent.
+
+Run with:  adk web .   (from the autonomous-ai-scraper project root)
+"""
+
+from __future__ import annotations
+
+import sys
+import os
+import logging
+from typing import AsyncGenerator
+
+# Ensure the project root is on sys.path so we can import shared/mcps/agents
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+# Load .env from the project root before anything else
+from dotenv import load_dotenv
+load_dotenv(os.path.join(_PROJECT_ROOT, ".env"))
+
+from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
+from google.adk.models import BaseLlm, LLMRegistry
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
+from google.adk.models.lite_llm import LiteLlm
+
+from agents.planner_agent import (
+    tool_discover,
+    tool_classify_urls,
+    tool_enqueue_urls,
+    tool_get_next_batch,
+    tool_fetch_and_extract,
+    tool_validate_and_store,
+    tool_checkpoint,
+    tool_get_crawl_stats,
+    tool_get_domain_recommendations,
+    tool_finalize_crawl,
+    init_mcps,
+)
+from shared.utils.config import get_config
+
+logger = logging.getLogger("autonomous_scraper.agent")
+
+# ── Custom LLM Providers & Fallback Chain ──────────────────────────────────────
+
+class OpenRouterLlm(LiteLlm):
+    """Enables OpenRouter routing via LiteLlm wrapper."""
+    @classmethod
+    def supported_models(cls) -> list[str]:
+        return ['openrouter/.*']
+
+LLMRegistry.register(OpenRouterLlm)
+
+
+class FallbackLlm(BaseLlm):
+    """Orchestrates model fallback chain for all agent queries:
+    Gemini -> Groq -> OpenRouter
+    """
+    @classmethod
+    def supported_models(cls) -> list[str]:
+        return ["fallback-llm"]
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        config = get_config()
+
+        gemini_model = config.llm.gemini_model
+        groq_model = config.llm.groq_model
+        if not groq_model.startswith("groq/"):
+            groq_model = f"groq/{groq_model}"
+
+        openrouter_model = config.llm.openrouter_model
+        if not openrouter_model.startswith("openrouter/"):
+            openrouter_model = f"openrouter/{openrouter_model}"
+
+        # Additional standard OpenRouter models to try if the requested one fails
+        openrouter_fallback = "openrouter/qwen/qwen-2.5-7b-instruct"
+
+        models_to_try = [
+            ("Gemini", gemini_model),
+            ("Groq", groq_model),
+            ("OpenRouter (Primary)", openrouter_model),
+            ("OpenRouter (Fallback)", openrouter_fallback)
+        ]
+
+        last_error = None
+        for name, model_name in models_to_try:
+            try:
+                logger.info("FallbackLlm: Attempting query with %s (%s)", name, model_name)
+                # Resolve the model connection
+                model_impl = LLMRegistry.new_llm(model_name)
+                # Copy the request with the specific target model name
+                req = llm_request.model_copy(update={"model": model_name})
+                
+                # Execute generation
+                async for resp in model_impl.generate_content_async(req, stream=stream):
+                    yield resp
+                logger.info("FallbackLlm: Successfully completed turn with %s", name)
+                return
+            except Exception as e:
+                logger.warning("FallbackLlm: %s (%s) failed: %s", name, model_name, e)
+                last_error = e
+
+        logger.error("FallbackLlm: All models in fallback chain failed!")
+        raise last_error
+
+LLMRegistry.register(FallbackLlm)
+
+
+# ── Lazy MCP initialisation ──────────────────────────────────────────────────
+import asyncio
+
+_initialized = False
+_init_lock = asyncio.Lock()
+
+
+async def _ensure_initialized() -> None:
+    global _initialized
+    if not _initialized:
+        async with _init_lock:
+            if not _initialized:
+                config = get_config()
+                await init_mcps(config)
+                _initialized = True
+
+
+# ── Tool wrappers (ADK calls these as plain async functions) ──────────────────
+
+async def discover(seed_url: str, max_pages: int = 100) -> str:
+    """Discover all URLs on a website starting from seed_url.
+
+    Fetches robots.txt, parses sitemaps, and extracts navigation links.
+    Returns a JSON summary of discovered URLs and website profile.
+
+    Args:
+        seed_url: The starting URL for discovery (e.g. 'https://example.com').
+        max_pages: Maximum number of pages to include in the crawl budget.
+
+    Returns:
+        JSON string with keys: profile_domain, urls_discovered, product_patterns,
+        category_patterns, preferred_fetch_method.
+    """
+    await _ensure_initialized()
+    return await tool_discover(seed_url, max_pages)
+
+
+async def classify_urls(urls_json: str) -> str:
+    """Classify a list of URLs into page types (product, category, pagination, unknown).
+
+    Args:
+        urls_json: JSON array of URL strings to classify.
+
+    Returns:
+        JSON string with list of {url, page_type, confidence, priority}.
+    """
+    await _ensure_initialized()
+    return await tool_classify_urls(urls_json)
+
+
+async def enqueue_urls(classified_urls_json: str) -> str:
+    """Add classified URLs to the crawler queue.
+
+    Args:
+        classified_urls_json: JSON array of classified URL objects from classify_urls.
+
+    Returns:
+        JSON with count of URLs enqueued and current queue stats.
+    """
+    await _ensure_initialized()
+    return await tool_enqueue_urls(classified_urls_json)
+
+
+async def get_next_batch(batch_size: int = 5) -> str:
+    """Get the next batch of URLs to process from the crawler queue.
+
+    Args:
+        batch_size: Number of URLs to fetch (default 5).
+
+    Returns:
+        JSON array of URL objects with page_type and priority.
+    """
+    await _ensure_initialized()
+    return await tool_get_next_batch(batch_size)
+
+
+async def fetch_and_extract(url: str, page_type: str = "product") -> str:
+    """Fetch a URL and extract product data from it.
+
+    This tool fetches the page (HTTP or Playwright as needed), then runs
+    the 5-stage extraction pipeline. Use only for product pages.
+
+    Args:
+        url: The URL to fetch and extract from.
+        page_type: Expected page type ('product' recommended).
+
+    Returns:
+        JSON with extraction success, confidence, method, and key product fields.
+    """
+    await _ensure_initialized()
+    return await tool_fetch_and_extract(url, page_type)
+
+
+async def validate_and_store(url: str) -> str:
+    """Validate the last extracted product from a URL and store it if valid.
+
+    Run fetch_and_extract first on the URL, then call this to validate and persist.
+
+    Args:
+        url: The URL of the product page that was previously extracted.
+
+    Returns:
+        JSON with verdict (PASS/WARN/FAIL), quality_score, and storage result.
+    """
+    await _ensure_initialized()
+    return await tool_validate_and_store(url)
+
+
+async def save_checkpoint() -> str:
+    """Save the current crawler queue state to a checkpoint file.
+
+    Call this periodically during long crawls to enable resume on interruption.
+
+    Returns:
+        JSON with checkpoint path and queue statistics.
+    """
+    await _ensure_initialized()
+    return await tool_checkpoint()
+
+
+async def get_crawl_stats() -> str:
+    """Get real-time statistics for the current crawl session.
+
+    Returns:
+        JSON with counts for fetched, extracted, passed, failed, and error metrics.
+    """
+    await _ensure_initialized()
+    return await tool_get_crawl_stats()
+
+
+async def get_domain_recommendations(domain: str) -> str:
+    """Get Knowledge MCP recommendations for scraping a specific domain.
+
+    Use this before starting a crawl to check if we have prior knowledge.
+
+    Args:
+        domain: The domain to get recommendations for (e.g. 'example.com').
+
+    Returns:
+        JSON with preferred_fetch_method, skip_discovery, selector_version,
+        rollback_selector_version recommendations.
+    """
+    await _ensure_initialized()
+    return await tool_get_domain_recommendations(domain)
+
+
+async def finalize_crawl() -> str:
+    """Finalize the crawl: flush storage, update knowledge profile, return summary.
+
+    Call this when the crawl is complete or the budget is exhausted.
+
+    Returns:
+        JSON summary of the completed crawl.
+    """
+    await _ensure_initialized()
+    return await tool_finalize_crawl()
+
+
+# ── Build the ADK LlmAgent ────────────────────────────────────────────────────
+
+root_agent = LlmAgent(
+    name="autonomous_scraper_planner",
+    model="fallback-llm",  # Orchestrated fallback chain
+    description=(
+        "Autonomous AI web scraping planner. "
+        "Give it a website URL and it will discover, classify, fetch, "
+        "extract, validate and store product data for you."
+    ),
+    instruction="""You are an autonomous AI web scraping planner. Your goal is to crawl websites and extract product details according to the user's instructions.
+
+When you receive a scraping request, you MUST execute the following workflow in order:
+
+**Step 1 — Check prior knowledge**
+- Extract the domain name from the seed URL.
+- Call `get_domain_recommendations` for that domain.
+- Note whether `skip_discovery` is true and what `preferred_fetch_method` is recommended.
+
+**Step 2 — Discover URLs**
+- If `skip_discovery` is true (domain was crawled before), skip this step.
+- Otherwise call `discover` with the seed URL and a suitable `max_pages` limit.
+- Report how many URLs were found.
+
+**Step 3 — Classify URLs**
+- Call `classify_urls` with a JSON array of the discovered URLs.
+- This assigns each URL a page type: "product", "category", "pagination", or "unknown".
+
+**Step 4 — Enqueue URLs**
+- Call `enqueue_urls` with the JSON array of classified URL objects.
+- This populates the crawl queue.
+
+**Step 5 — Process batches in a loop**
+- Repeat until the queue is empty or the budget is reached:
+  - Call `get_next_batch` (batch_size=5 is a good default).
+  - For EACH URL returned where page_type == "product":
+    - Call `fetch_and_extract` on that URL.
+    - Call `validate_and_store` on that URL.
+  - Every 50 products processed, call `save_checkpoint`.
+- Call `get_crawl_stats` periodically to report progress to the user.
+
+**Step 6 — Finalize**
+- Call `finalize_crawl` once the queue is empty or budget exhausted.
+- Report to the user: total products stored, success rate, output file locations.
+
+**Rules**
+- NEVER skip `validate_and_store` after `fetch_and_extract`.
+- Process ONLY product-type URLs through fetch_and_extract; skip others.
+- Always call `finalize_crawl` at the end, even if 0 products were found.
+- Be transparent: tell the user which step you are on and what you found.
+""",
+    tools=[
+        FunctionTool(discover),
+        FunctionTool(classify_urls),
+        FunctionTool(enqueue_urls),
+        FunctionTool(get_next_batch),
+        FunctionTool(fetch_and_extract),
+        FunctionTool(validate_and_store),
+        FunctionTool(save_checkpoint),
+        FunctionTool(get_crawl_stats),
+        FunctionTool(get_domain_recommendations),
+        FunctionTool(finalize_crawl),
+    ],
+)

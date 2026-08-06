@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autonomous-ai-scraper"
+version = "1.0.0"
+description = "Enterprise-grade autonomous AI web scraping framework powered by Google ADK"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    # Core async HTTP
+    "aiohttp>=3.9.0",
+    "httpx>=0.27.0",
+
+    # Browser automation
+    "playwright>=1.44.0",
+
+    # Data models & validation
+    "pydantic>=2.7.0",
+
+    # Async SQLite
+    "aiosqlite>=0.20.0",
+
+    # HTML parsing
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.2.0",
+
+    # Config loading
+    "pyyaml>=6.0.1",
+
+    # Structured logging
+    "structlog>=24.2.0",
+
+    # Google ADK (sole reasoning engine)
+    "google-adk>=2.5.0",
+
+    # Gemini
+    "google-genai>=2.12.0",
+
+    # Groq
+    "groq>=1.5.0",
+
+    # OpenRouter (via OpenAI-compatible API)
+    "openai>=2.46.0",
+
+    # Environment variable loading
+    "python-dotenv>=1.2.0",
+
+    # CSS/XPath selectors
+    "cssselect>=1.4.0",
+
+    # Excel Export
+    "openpyxl>=3.1.0",
+
+    # Server API
+    "fastapi>=0.115.0",
+    "uvicorn>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.14.0",
+    "aioresponses>=0.7.6",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+scraper = "main:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["agents", "mcps", "shared"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true

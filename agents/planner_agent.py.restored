@@ -1,0 +1,692 @@
+"""
+agents/planner_agent.py
+
+ADK Planner Agent — the SOLE reasoning engine of the autonomous-ai-scraper.
+
+This agent:
+- Accepts natural-language scraping requests from the user
+- Plans the full MCP workflow
+- Orchestrates all MCPs via tool calls
+- Switches LLM providers automatically on quota/rate-limit/timeout
+- NEVER performs scraping, extraction, or storage logic directly
+
+ADK Architecture:
+- Primary LLM: Gemini (gemini-2.5-flash)
+- Fallback 1: Groq (llama-3.3-70b-versatile)
+- Fallback 2: OpenRouter (qwen/qwen3-8b via OpenAI-compatible API)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import datetime
+from typing import Any
+from urllib.parse import urlsplit
+
+import google.generativeai as genai
+from google.adk.agents import Agent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.adk.tools import FunctionTool
+from groq import AsyncGroq
+from openai import AsyncOpenAI
+
+from mcps.classification.classification_mcp import ClassificationMCP
+from mcps.crawler.crawler_mcp import CrawlerMCP
+from mcps.discovery.discovery_mcp import DiscoveryMCP
+from mcps.execution.execution_mcp import ExecutionMCP
+from mcps.extraction.extraction_mcp import ExtractionMCP
+from mcps.knowledge.knowledge_mcp import KnowledgeMCP
+from mcps.storage.storage_mcp import StorageMCP
+from mcps.validation.validation_mcp import ValidationMCP
+from shared.models import (
+    ClassifiedURL,
+    CrawlStatistics,
+    CrawlTask,
+    WebsiteProfile,
+)
+from shared.utils.config import Config, get_config
+from shared.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+APP_NAME = "autonomous-ai-scraper"
+USER_ID = "planner-user"
+SESSION_ID = "crawl-session"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool wrapper functions (ADK tools must be plain async functions)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_discovery_mcp: DiscoveryMCP | None = None
+_classification_mcp: ClassificationMCP | None = None
+_crawler_mcp: CrawlerMCP | None = None
+_execution_mcp: ExecutionMCP | None = None
+_extraction_mcp: ExtractionMCP | None = None
+_validation_mcp: ValidationMCP | None = None
+_storage_mcp: StorageMCP | None = None
+_knowledge_mcp: KnowledgeMCP | None = None
+_crawl_task: CrawlTask | None = None
+_stats: CrawlStatistics | None = None
+_config: Config | None = None
+
+
+def _get_mcps() -> tuple[
+    DiscoveryMCP,
+    ClassificationMCP,
+    CrawlerMCP,
+    ExecutionMCP,
+    ExtractionMCP,
+    ValidationMCP,
+    StorageMCP,
+    KnowledgeMCP,
+]:
+    assert all([
+        _discovery_mcp, _classification_mcp, _crawler_mcp,
+        _execution_mcp, _extraction_mcp, _validation_mcp,
+        _storage_mcp, _knowledge_mcp,
+    ]), "MCPs not initialised — call init_mcps() first"
+    return (  # type: ignore[return-value]
+        _discovery_mcp, _classification_mcp, _crawler_mcp,
+        _execution_mcp, _extraction_mcp, _validation_mcp,
+        _storage_mcp, _knowledge_mcp,
+    )
+
+
+async def tool_discover(seed_url: str, max_pages: int = 100) -> str:
+    """Discover all URLs on a website starting from seed_url.
+
+    Fetches robots.txt, parses sitemaps, and extracts navigation links.
+    Returns a JSON summary of discovered URLs and website profile.
+
+    Args:
+        seed_url: The starting URL for discovery (e.g. 'https://example.com').
+        max_pages: Maximum number of pages to include in the crawl budget.
+
+    Returns:
+        JSON string with keys: profile_domain, urls_discovered, product_patterns,
+        category_patterns, preferred_fetch_method.
+    """
+    global _crawl_task, _stats
+
+    discovery, *_ = _get_mcps()[:1]
+    config = get_config()
+
+    domain = urlsplit(seed_url).netloc
+    task = CrawlTask(
+        seed_url=seed_url,
+        domain=domain,
+        max_pages=max_pages,
+    )
+    _crawl_task = task
+    _stats = CrawlStatistics(task_id=task.task_id, domain=domain)
+
+    logger.info("tool_discover called", seed_url=seed_url, max_pages=max_pages)
+
+    result = await discovery.discover(task)
+
+    # Persist profile to Knowledge MCP
+    _, _, _, _, _, _, _, knowledge = _get_mcps()
+    await knowledge.save_profile(result.profile)
+
+    return json.dumps({
+        "profile_domain": result.profile.domain,
+        "urls_discovered": len(result.urls),
+        "sample_urls": result.urls[:10],
+        "product_patterns": result.profile.product_url_patterns,
+        "category_patterns": result.profile.category_url_patterns,
+        "preferred_fetch_method": result.profile.preferred_fetch_method,
+        "robots_disallow_count": len(result.profile.robots_disallow),
+    })
+
+
+async def tool_classify_urls(urls_json: str) -> str:
+    """Classify a list of URLs into page types (product, category, pagination, unknown).
+
+    Args:
+        urls_json: JSON array of URL strings to classify.
+
+    Returns:
+        JSON string with list of {url, page_type, confidence, priority}.
+    """
+    _, classification, *_ = _get_mcps()[:2]
+    _, _, _, _, _, _, _, knowledge = _get_mcps()
+
+    urls: list[str] = json.loads(urls_json)
+    if not urls:
+        return json.dumps([])
+
+    # Get profile for domain context
+    domain = urlsplit(urls[0]).netloc
+    profile = await knowledge.get_profile(domain) or WebsiteProfile(
+        domain=domain, seed_url=urls[0]
+    )
+
+    classified = await classification.classify(urls, profile)
+
+    return json.dumps([
+        {
+            "url": c.url,
+            "page_type": c.page_type,
+            "confidence": c.confidence,
+            "priority": c.priority,
+        }
+        for c in classified
+    ])
+
+
+async def tool_enqueue_urls(classified_urls_json: str) -> str:
+    """Add classified URLs to the crawler queue.
+
+    Args:
+        classified_urls_json: JSON array of classified URL objects from tool_classify_urls.
+
+    Returns:
+        JSON with count of URLs enqueued and current queue stats.
+    """
+    _, _, crawler, *_ = _get_mcps()[:3]
+
+    data: list[dict] = json.loads(classified_urls_json)
+    classified = [
+        ClassifiedURL(
+            url=d["url"],
+            page_type=d["page_type"],
+            confidence=d["confidence"],
+            priority=d["priority"],
+        )
+        for d in data
+    ]
+    await crawler.enqueue(classified)
+    stats = crawler.stats()
+    return json.dumps({"enqueued": len(classified), "queue_stats": stats})
+
+
+async def tool_get_next_batch(batch_size: int = 5) -> str:
+    """Get the next batch of URLs to process from the crawler queue.
+
+    Args:
+        batch_size: Number of URLs to fetch (default 5).
+
+    Returns:
+        JSON array of URL objects with page_type and priority.
+    """
+    _, _, crawler, *_ = _get_mcps()[:3]
+    batch = await crawler.next_batch(batch_size)
+    return json.dumps([
+        {"url": c.url, "page_type": c.page_type, "priority": c.priority}
+        for c in batch
+    ])
+
+
+async def tool_fetch_and_extract(url: str, page_type: str = "product") -> str:
+    """Fetch a URL and extract product data from it.
+
+    This tool fetches the page (HTTP or Playwright as needed), then runs
+    the 5-stage extraction pipeline. Use only for product pages.
+
+    Args:
+        url: The URL to fetch and extract from.
+        page_type: Expected page type ('product' recommended).
+
+    Returns:
+        JSON with extraction success, confidence, method, and key product fields.
+    """
+    global _stats
+
+    _, _, _, execution, extraction, _, _, knowledge = _get_mcps()
+
+    domain = urlsplit(url).netloc
+    profile = await knowledge.get_profile(domain) or WebsiteProfile(
+        domain=domain, seed_url=url
+    )
+
+    # Fetch
+    fetch_result = await execution.smart_fetch(url, profile)
+    if _stats:
+        _stats.total_fetched += 1
+        if fetch_result.fetch_method == "playwright":
+            _stats.playwright_fetches += 1
+        else:
+            _stats.http_fetches += 1
+        if fetch_result.from_cache:
+            _stats.cache_hits += 1
+
+    if not fetch_result.success or not fetch_result.html:
+        if _stats:
+            _stats.total_errors += 1
+        return json.dumps({
+            "success": False,
+            "url": url,
+            "error": fetch_result.error.message if fetch_result.error else "Fetch failed",
+        })
+
+    # Extract
+    extraction_result = await extraction.extract(fetch_result.html, profile)
+
+    return json.dumps({
+        "success": extraction_result.success,
+        "url": url,
+        "confidence": extraction_result.confidence,
+        "method": extraction_result.method,
+        "title": extraction_result.product.title if extraction_result.product else None,
+        "price": extraction_result.product.price if extraction_result.product else None,
+        "currency": extraction_result.product.currency if extraction_result.product else None,
+        "brand": extraction_result.product.brand if extraction_result.product else None,
+        "sku": extraction_result.product.sku if extraction_result.product else None,
+        "availability": extraction_result.product.availability if extraction_result.product else None,
+        "warnings": extraction_result.warnings,
+    })
+
+
+async def tool_validate_and_store(url: str) -> str:
+    """Validate the last extracted product from a URL and store it if valid.
+
+    Run tool_fetch_and_extract first, then call this to validate and persist.
+
+    Args:
+        url: The URL of the product page that was previously extracted.
+
+    Returns:
+        JSON with verdict (PASS/WARN/FAIL), quality_score, and storage result.
+    """
+    global _stats
+
+    _, _, crawler, execution, extraction, validation, storage, knowledge = _get_mcps()
+
+    domain = urlsplit(url).netloc
+    profile = await knowledge.get_profile(domain) or WebsiteProfile(
+        domain=domain, seed_url=url
+    )
+
+    # Re-fetch and extract (in a real pipeline the Planner stores state between calls)
+    fetch_result = await execution.smart_fetch(url, profile)
+    if not fetch_result.success or not fetch_result.html:
+        await crawler.mark_failed(url, "Fetch failed on validate step")
+        return json.dumps({"success": False, "url": url, "error": "Fetch failed"})
+
+    extraction_result = await extraction.extract(fetch_result.html, profile)
+    validation_result = await validation.validate(extraction_result)
+
+    if _stats:
+        _stats.total_products_extracted += 1
+
+    stored = False
+    if validation_result.passed and extraction_result.product:
+        write_result = await storage.write(extraction_result.product, validation_result)
+        stored = write_result.success
+        if stored:
+            if _stats:
+                _stats.total_products_passed += 1
+            await knowledge.record_extraction_success(
+                domain, profile.selector_version, extraction_result.method
+            )
+        await crawler.mark_completed(url)
+    else:
+        if _stats:
+            _stats.total_products_failed += 1
+        await crawler.mark_failed(url, str(validation_result.errors))
+        await knowledge.record_extraction_failure(domain, profile.selector_version)
+
+    return json.dumps({
+        "url": url,
+        "verdict": validation_result.verdict,
+        "quality_score": validation_result.quality_score,
+        "stored": stored,
+        "errors": validation_result.errors,
+        "warnings": validation_result.warnings,
+        "is_duplicate": validation_result.is_duplicate,
+    })
+
+
+async def tool_checkpoint() -> str:
+    """Save the current crawler queue state to a checkpoint file.
+
+    Call this periodically during long crawls to enable resume on interruption.
+
+    Returns:
+        JSON with checkpoint path and queue statistics.
+    """
+    _, _, crawler, *_ = _get_mcps()[:3]
+    await crawler.checkpoint()
+    stats = crawler.stats()
+    return json.dumps({"checkpointed": True, "queue_stats": stats})
+
+
+async def tool_get_crawl_stats() -> str:
+    """Get real-time statistics for the current crawl session.
+
+    Returns:
+        JSON with counts for fetched, extracted, passed, failed, and error metrics.
+    """
+    _, _, crawler, *_ = _get_mcps()[:3]
+    queue_stats = crawler.stats()
+
+    crawl_stats = {}
+    if _stats:
+        crawl_stats = {
+            "total_fetched": _stats.total_fetched,
+            "total_products_extracted": _stats.total_products_extracted,
+            "total_products_passed": _stats.total_products_passed,
+            "total_products_failed": _stats.total_products_failed,
+            "total_errors": _stats.total_errors,
+            "http_fetches": _stats.http_fetches,
+            "playwright_fetches": _stats.playwright_fetches,
+            "cache_hits": _stats.cache_hits,
+            "success_rate": _stats.success_rate,
+        }
+
+    return json.dumps({**queue_stats, **crawl_stats})
+
+
+async def tool_get_domain_recommendations(domain: str) -> str:
+    """Get Knowledge MCP recommendations for scraping a specific domain.
+
+    Use this before starting a crawl to check if we have prior knowledge.
+
+    Args:
+        domain: The domain to get recommendations for (e.g. 'example.com').
+
+    Returns:
+        JSON with preferred_fetch_method, skip_discovery, selector_version,
+        rollback_selector_version recommendations.
+    """
+    _, _, _, _, _, _, _, knowledge = _get_mcps()
+    recs = await knowledge.get_recommendations(domain)
+    return json.dumps({
+        "preferred_fetch_method": recs.preferred_fetch_method,
+        "recommended_concurrency": recs.recommended_concurrency,
+        "selector_version": recs.selector_version,
+        "skip_discovery": recs.skip_discovery,
+        "rollback_selector_version": recs.rollback_selector_version,
+        "notes": recs.notes,
+    })
+
+
+async def tool_finalize_crawl() -> str:
+    """Finalize the crawl: flush storage, update knowledge profile, return summary.
+
+    Call this when the crawl is complete or the budget is exhausted.
+
+    Returns:
+        JSON summary of the completed crawl.
+    """
+    global _stats, _crawl_task
+
+    _, _, crawler, _, _, _, storage, knowledge = _get_mcps()
+
+    await storage.flush()
+    await storage.close()
+
+    queue_stats = crawler.stats()
+
+    if _stats and _crawl_task:
+        _stats.completed_at = datetime.utcnow()
+        domain = _crawl_task.domain
+        profile = await knowledge.get_profile(domain)
+        if profile:
+            await knowledge.update_from_crawl(_stats, profile)
+
+    return json.dumps({
+        "crawl_complete": True,
+        "queue_stats": queue_stats,
+        "crawl_stats": {
+            "total_products_passed": _stats.total_products_passed if _stats else 0,
+            "total_fetched": _stats.total_fetched if _stats else 0,
+            "elapsed_seconds": _stats.elapsed_seconds if _stats else None,
+        },
+        "outputs": "Check outputs/ directory for CSV, JSON, and SQLite files",
+    })
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LLM Provider Fallback Chain
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LLMProviderError(Exception):
+    """Raised when all LLM providers are exhausted."""
+
+
+async def _try_gemini(model: str, api_key: str, prompt: str) -> str:
+    """Attempt a Gemini API call."""
+    genai.configure(api_key=api_key)
+    client = genai.GenerativeModel(model)
+    response = await asyncio.to_thread(client.generate_content, prompt)
+    return response.text
+
+
+async def _try_groq(model: str, api_key: str, prompt: str) -> str:
+    """Attempt a Groq API call."""
+    client = AsyncGroq(api_key=api_key)
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=4096,
+    )
+    return response.choices[0].message.content or ""
+
+
+async def _try_openrouter(model: str, api_key: str, prompt: str) -> str:
+    """Attempt an OpenRouter API call (OpenAI-compatible)."""
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+    )
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=4096,
+    )
+    return response.choices[0].message.content or ""
+
+
+async def llm_with_fallback(prompt: str, config: Config) -> str:
+    """Execute a prompt through the LLM fallback chain.
+
+    Order: Gemini → Groq → OpenRouter
+
+    Args:
+        prompt: The prompt to send to the LLM.
+        config: Configuration containing model names and API keys.
+
+    Returns:
+        LLM response text.
+
+    Raises:
+        LLMProviderError: If all providers fail.
+    """
+    providers = [
+        ("gemini", _try_gemini, config.llm.gemini_model, config.llm.google_api_key),
+        ("groq", _try_groq, config.llm.groq_model, config.llm.groq_api_key),
+        ("openrouter", _try_openrouter, config.llm.openrouter_model, config.llm.openrouter_api_key),
+    ]
+
+    last_error: Exception | None = None
+    for name, fn, model, api_key in providers:
+        if not api_key:
+            logger.warning("LLM provider skipped — no API key", provider=name)
+            continue
+        try:
+            logger.info("Trying LLM provider", provider=name, model=model)
+            result = await fn(model, api_key, prompt)
+            logger.info("LLM provider succeeded", provider=name)
+            return result
+        except Exception as e:
+            logger.warning("LLM provider failed", provider=name, error=str(e))
+            last_error = e
+
+    raise LLMProviderError(f"All LLM providers exhausted. Last error: {last_error}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCP Initialisation
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def init_mcps(config: Config) -> None:
+    """Initialise all MCP singletons.
+
+    Args:
+        config: Loaded application configuration.
+    """
+    global (
+        _discovery_mcp, _classification_mcp, _crawler_mcp,
+        _execution_mcp, _extraction_mcp, _validation_mcp,
+        _storage_mcp, _knowledge_mcp, _config,
+    )
+    _config = config
+
+    _knowledge_mcp = KnowledgeMCP(config.knowledge.db_path)
+    await _knowledge_mcp.init()
+
+    _discovery_mcp = DiscoveryMCP(config)
+    _classification_mcp = ClassificationMCP()
+    _execution_mcp = ExecutionMCP(config)
+    _extraction_mcp = ExtractionMCP(config)
+    _validation_mcp = ValidationMCP()
+    _storage_mcp = StorageMCP(config)
+
+    logger.info("All MCPs initialised")
+
+
+async def teardown_mcps() -> None:
+    """Cleanly shut down all MCP resources."""
+    if _execution_mcp:
+        await _execution_mcp.close()
+    if _storage_mcp:
+        await _storage_mcp.close()
+    if _knowledge_mcp:
+        await _knowledge_mcp.close()
+    logger.info("All MCPs shut down")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADK Agent Setup
+# ─────────────────────────────────────────────────────────────────────────────
+
+PLANNER_SYSTEM_PROMPT = """You are an autonomous AI web scraping planner. Your job is to:
+
+1. Understand the user's scraping request (what site, what data, how many products).
+2. Check domain recommendations from Knowledge MCP to reuse prior knowledge.
+3. Use Discovery MCP to find all URLs on the site.
+4. Use Classification MCP to identify product pages.
+5. Use Crawler MCP to manage the URL queue.
+6. For each product URL batch: use fetch_and_extract, then validate_and_store.
+7. Checkpoint periodically (every 50 URLs).
+8. When done: call finalize_crawl and report a summary to the user.
+
+Rules you must follow:
+- Process URLs in batches of 5-10 for efficiency.
+- Only call fetch_and_extract on product-type pages.
+- Call tool_checkpoint every 50 products processed.
+- Always call tool_finalize_crawl when the queue is empty or budget is reached.
+- Report final statistics: products found, products stored, success rate.
+- If a domain has been crawled before (skip_discovery=true from recommendations), 
+  skip discovery and go directly to classification.
+
+You have access to these tools:
+- tool_discover: Discover URLs from a website
+- tool_classify_urls: Classify URLs into page types
+- tool_enqueue_urls: Add URLs to the crawler queue
+- tool_get_next_batch: Get next URLs to process
+- tool_fetch_and_extract: Fetch a URL and extract product data
+- tool_validate_and_store: Validate and persist extracted product
+- tool_checkpoint: Save queue state for resume
+- tool_get_crawl_stats: Get real-time crawl statistics
+- tool_get_domain_recommendations: Check prior knowledge for a domain
+- tool_finalize_crawl: Complete the crawl and generate summary
+"""
+
+
+def build_adk_agent(config: Config) -> Agent:
+    """Build and return the ADK Planner Agent with all MCP tools registered.
+
+    Args:
+        config: Loaded application configuration.
+
+    Returns:
+        Configured ADK Agent instance.
+    """
+    tools = [
+        FunctionTool(tool_discover),
+        FunctionTool(tool_classify_urls),
+        FunctionTool(tool_enqueue_urls),
+        FunctionTool(tool_get_next_batch),
+        FunctionTool(tool_fetch_and_extract),
+        FunctionTool(tool_validate_and_store),
+        FunctionTool(tool_checkpoint),
+        FunctionTool(tool_get_crawl_stats),
+        FunctionTool(tool_get_domain_recommendations),
+        FunctionTool(tool_finalize_crawl),
+    ]
+
+    agent = Agent(
+        name="autonomous_scraper_planner",
+        model=f"google/{config.llm.gemini_model}",
+        description="Autonomous web scraping planner that orchestrates MCPs",
+        instruction=PLANNER_SYSTEM_PROMPT,
+        tools=tools,
+    )
+
+    logger.info(
+        "ADK Planner Agent built",
+        model=config.llm.gemini_model,
+        tool_count=len(tools),
+    )
+    return agent
+
+
+async def run_scraping_task(
+    prompt: str,
+    config: Config,
+) -> str:
+    """Run a scraping task from a natural-language prompt.
+
+    Args:
+        prompt: Natural-language scraping instruction from the user.
+        config: Loaded application configuration.
+
+    Returns:
+        Final response text from the planner agent.
+    """
+    await init_mcps(config)
+
+    try:
+        agent = build_adk_agent(config)
+        session_service = InMemorySessionService()
+
+        await session_service.create_session(
+            app_name=APP_NAME,
+            user_id=USER_ID,
+            session_id=SESSION_ID,
+        )
+
+        runner = Runner(
+            agent=agent,
+            app_name=APP_NAME,
+            session_service=session_service,
+        )
+
+        from google.adk.types import Content, Part
+
+        final_response = ""
+        async for event in runner.run_async(
+            user_id=USER_ID,
+            session_id=SESSION_ID,
+            new_message=Content(parts=[Part(text=prompt)]),
+        ):
+            if event.is_final_response() and event.content and event.content.parts:
+                final_response = "".join(
+                    p.text for p in event.content.parts if hasattr(p, "text")
+                )
+
+        return final_response
+    finally:
+        await teardown_mcps()
+
+
+# Expose the crawler MCP setter for main.py to inject after task creation
+def set_crawler_mcp(task: CrawlTask, config: Config) -> None:
+    """Inject a CrawlerMCP for the given task (called by main.py after task creation)."""
+    global _crawler_mcp
+    _crawler_mcp = CrawlerMCP(task=task, config=config)

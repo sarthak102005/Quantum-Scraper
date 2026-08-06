@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantum Scraper — E-Commerce Crawler Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-gradient: linear-gradient(135deg, #0a0616 0%, #12092b 50%, #05020c 100%);
+            --glass-bg: rgba(18, 10, 36, 0.55);
+            --glass-border: rgba(255, 255, 255, 0.06);
+            --text-primary: #f3f0fa;
+            --text-secondary: #a89cb9;
+            --accent-glow: #8b5cf6;
+            --accent-green: #10b981;
+            --accent-blue: #3b82f6;
+            --terminal-bg: #070311;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg-gradient);
+            color: var(--text-primary);
+            min-height: 100/vh;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            align-items: center;
+            padding: 2rem 1.5rem;
+        }
+
+        header {
+            width: 100%;
+            max-width: 1200px;
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo-section h1 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(90deg, #c084fc 0%, #818cf8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -1px;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo-section p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            margin-top: 0.25rem;
+        }
+
+        main {
+            width: 100%;
+            max-width: 1200px;
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 2rem;
+        }
+
+        @media (min-width: 900px) {
+            main {
+                grid-template-columns: 350px 1fr;
+            }
+        }
+
+        .panel {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 20px;
+            padding: 2rem;
+            backdrop-filter: blur(20px);
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        label {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        input, select {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 0.9rem 1rem;
+            color: var(--text-primary);
+            font-size: 1rem;
+            font-family: inherit;
+            transition: all 0.3s ease;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--accent-glow);
+            box-shadow: 0 0 15px rgba(139, 92, 246, 0.35);
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        button {
+            width: 100%;
+            background: linear-gradient(135deg, #a855f7 0%, #6366f1 100%);
+            border: none;
+            border-radius: 12px;
+            padding: 1rem;
+            color: white;
+            font-size: 1.05rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 30px rgba(139, 92, 246, 0.5);
+            filter: brightness(1.1);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            background: rgba(255, 255, 255, 0.08);
+            color: rgba(255, 255, 255, 0.3);
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 16px;
+            padding: 1.2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            transition: border-color 0.3s ease;
+        }
+
+        .stat-card.active {
+            border-color: rgba(139, 92, 246, 0.2);
+        }
+
+        .stat-val {
+            font-size: 1.8rem;
+            font-weight: 800;
+            color: var(--text-primary);
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .console-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            min-height: 500px;
+        }
+
+        .console-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            font-weight: 600;
+            padding: 0.4rem 0.8rem;
+            border-radius: 50px;
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .badge-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--text-secondary);
+        }
+
+        .status-badge.running .badge-dot {
+            background: var(--accent-blue);
+            box-shadow: 0 0 10px var(--accent-blue);
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-badge.completed .badge-dot {
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green);
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+        }
+
+        .terminal-container {
+            flex: 1;
+            background: var(--terminal-bg);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 14px;
+            padding: 1.2rem;
+            overflow-y: auto;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: #d1cbdc;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            max-height: 400px;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.8);
+        }
+
+        .log-entry {
+            line-height: 1.4;
+            word-break: break-all;
+        }
+
+        .log-time {
+            color: #7c6f96;
+            margin-right: 0.5rem;
+        }
+
+        .log-info { color: #a78bfa; }
+        .log-success { color: #34d399; }
+        .log-warn { color: #fbbf24; }
+        .log-error { color: #f87171; }
+
+        .table-container {
+            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.01);
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+
+        th {
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text-secondary);
+            font-weight: 600;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            color: var(--text-primary);
+            max-width: 250px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.01);
+        }
+
+        .action-bar {
+            display: flex;
+            gap: 1rem;
+        }
+
+        .btn-download {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            box-shadow: 0 4px 20px rgba(16, 185, 129, 0.25);
+            flex: 1;
+        }
+
+        .btn-download:hover:not(:disabled) {
+            box-shadow: 0 6px 30px rgba(16, 185, 129, 0.45);
+        }
+
+        .btn-download-json {
+            background: linear-gradient(135deg, #3b82f6 0%, #6366f1 100%);
+            box-shadow: 0 4px 20px rgba(59, 130, 246, 0.25);
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            padding: 0.85rem 1.4rem;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            flex: 1;
+        }
+
+        .btn-download-json:hover:not(:disabled) {
+            box-shadow: 0 6px 30px rgba(59, 130, 246, 0.45);
+            transform: translateY(-1px);
+        }
+
+        .btn-download-excel {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            box-shadow: 0 4px 20px rgba(245, 158, 11, 0.25);
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            padding: 0.85rem 1.4rem;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            flex: 1;
+            white-space: nowrap;
+        }
+
+        .btn-download-excel:hover:not(:disabled) {
+            box-shadow: 0 6px 30px rgba(245, 158, 11, 0.45);
+            transform: translateY(-1px);
+        }
+
+        .btn-download:disabled,
+        .btn-download-json:disabled,
+        .btn-download-excel:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="logo-section">
+            <h1>🌌 Quantum Scraper</h1>
+            <p>High-Throughput E-Commerce Crawling Pipeline</p>
+        </div>
+    </header>
+
+    <main>
+        <!-- Sidebar Controls -->
+        <section class="panel">
+            <div class="form-group">
+                <label for="seedUrl">Target Website / Seed URL</label>
+                <input type="url" id="seedUrl" placeholder="https://www.kawasaki.com/en-us/" value="https://www.kawasaki.com/en-us/">
+            </div>
+
+            <div class="form-group">
+                <label for="limit">Product Count Limit</label>
+                <input type="number" id="limit" min="1" max="5000" value="50">
+            </div>
+
+            <button id="startBtn">
+                <span id="startIcon">⚡</span> <span id="startText">Initialize Scraper</span>
+            </button>
+            <button id="stopBtn" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); margin-top: 0.5rem; display: none;">
+                🛑 Stop Crawling
+            </button>
+            <button id="resumeBtn" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); margin-top: 0.5rem; display: none;">
+                ▶️ Resume Crawling
+            </button>
+
+
+            <div class="stats-grid">
+                <div class="stat-card" id="pagesVisitedCard">
+                    <span class="stat-val" id="pagesVisited">0</span>
+                    <span class="stat-label">Pages Traversed</span>
+                </div>
+                <div class="stat-card" id="productsSavedCard">
+                    <span class="stat-val" id="productsSaved">0</span>
+                    <span class="stat-label">Products Saved</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Right Terminal/Status Console -->
+        <section class="panel console-panel">
+            <div class="console-header">
+                <label>Crawler Engine Status</label>
+                <div class="status-badge" id="statusBadge">
+                    <span class="badge-dot"></span>
+                    <span id="statusText">Idle</span>
+                </div>
+            </div>
+
+            <!-- Terminal output window -->
+            <div class="terminal-container" id="terminal">
+                <div class="log-entry"><span class="log-time">[SYSTEM]</span> Ready to commence crawl operations. Enter target URL to begin.</div>
+            </div>
+
+            <div class="console-header">
+                <label>Extracted Product Real-time Preview</label>
+            </div>
+
+            <!-- Preview Data Table -->
+            <div class="table-container">
+                <table id="productTable">
+                    <thead>
+                        <tr>
+                            <th>Title</th>
+                            <th>URL</th>
+                        </tr>
+                    </thead>
+                    <tbody id="productTableBody">
+                        <tr>
+                            <td colspan="2" style="text-align: center; color: var(--text-secondary); padding: 2rem;">No products loaded yet</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Download controls -->
+            <div class="action-bar" style="margin-top: auto; display: flex; gap: 0.75rem; flex-wrap: wrap;">
+                <button class="btn-download" id="downloadBtn" disabled>
+                    📥 Export CSV
+                </button>
+                <button class="btn-download-excel" id="downloadExcelBtn" disabled>
+                    📊 Export Excel (.xlsx)
+                </button>
+                <button class="btn-download-json" id="downloadJsonBtn" disabled>
+                    🗂️ Download ZIP
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        const seedUrlInput = document.getElementById('seedUrl');
+        const limitInput = document.getElementById('limit');
+        const startBtn = document.getElementById('startBtn');
+        const startText = document.getElementById('startText');
+        const stopBtn = document.getElementById('stopBtn');
+        const resumeBtn = document.getElementById('resumeBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const downloadJsonBtn = document.getElementById('downloadJsonBtn');
+        const downloadExcelBtn = document.getElementById('downloadExcelBtn');
+        const pagesVisited = document.getElementById('pagesVisited');
+        const productsSaved = document.getElementById('productsSaved');
+        const statusText = document.getElementById('statusText');
+        const statusBadge = document.getElementById('statusBadge');
+        const terminal = document.getElementById('terminal');
+        const productTableBody = document.getElementById('productTableBody');
+
+        let crawlEventSource = null;
+        let productsList = [];
+
+        function appendLog(level, message, timestamp = null) {
+            const time = timestamp || new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            
+            let levelClass = 'log-info';
+            if (level === 'SUCCESS') levelClass = 'log-success';
+            if (level === 'WARN' || level === 'WARNING') levelClass = 'log-warn';
+            if (level === 'ERROR') levelClass = 'log-error';
+
+            entry.innerHTML = `<span class="log-time">[${time}]</span><span class="${levelClass}">[${level}]</span> ${message}`;
+            terminal.appendChild(entry);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        function updateStats(stats) {
+            pagesVisited.innerText = stats.pages_visited;
+            productsSaved.innerText = stats.products_scraped;
+        }
+
+        function setStatus(status) {
+            statusText.innerText = status.toUpperCase();
+            statusBadge.className = 'status-badge';
+            if (status === 'running') {
+                statusBadge.classList.add('running');
+                startBtn.disabled = true;
+                startText.innerText = 'Crawling Website...';
+                stopBtn.style.display = 'block';
+                resumeBtn.style.display = 'none';
+            } else if (status === 'stopped' || status === 'paused') {
+                statusBadge.className = 'status-badge'; // neutral
+                startBtn.disabled = false;
+                startText.innerText = 'Initialize Scraper';
+                stopBtn.style.display = 'none';
+                resumeBtn.style.display = 'block';
+                downloadBtn.disabled = false;
+                downloadJsonBtn.disabled = false;
+                downloadExcelBtn.disabled = false;
+            } else {
+                startBtn.disabled = false;
+                startText.innerText = 'Initialize Scraper';
+                stopBtn.style.display = 'none';
+                resumeBtn.style.display = 'none';
+                if (status === 'completed' || status === 'finished') {
+                    statusBadge.classList.add('completed');
+                    downloadBtn.disabled = false;
+                    downloadJsonBtn.disabled = false;
+                    downloadExcelBtn.disabled = false;
+                }
+            }
+        }
+
+
+        stopBtn.addEventListener('click', async () => {
+            appendLog('SYSTEM', 'Requesting crawl termination...');
+            try {
+                const response = await fetch('/api/crawl/stop', { method: 'POST' });
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || 'Failed to stop crawl');
+                }
+                appendLog('SUCCESS', 'Crawl execution terminated successfully.');
+                setStatus('stopped');
+                if (crawlEventSource) {
+                    crawlEventSource.close();
+                }
+            } catch (err) {
+                appendLog('ERROR', `Failed to stop crawl: ${err.message}`);
+            }
+        });
+
+        function addProductToTable(product) {
+            if (productsList.length === 0) {
+                productTableBody.innerHTML = '';
+            }
+            productsList.push(product);
+
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${product.title || 'N/A'}</td>
+                <td><a href="${product.url}" target="_blank" style="color: var(--accent-blue); text-decoration: none;">${product.url}</a></td>
+            `;
+            productTableBody.appendChild(row);
+        }
+
+        function connectSSE() {
+            if (crawlEventSource) {
+                crawlEventSource.close();
+            }
+
+            crawlEventSource = new EventSource('/api/crawl/logs');
+
+            crawlEventSource.addEventListener('log', (e) => {
+                const data = JSON.parse(e.data);
+                appendLog(data.level, data.message);
+            });
+
+            crawlEventSource.addEventListener('stats', (e) => {
+                const data = JSON.parse(e.data);
+                updateStats(data);
+            });
+
+            crawlEventSource.addEventListener('product', (e) => {
+                const data = JSON.parse(e.data);
+                addProductToTable(data);
+            });
+
+            crawlEventSource.addEventListener('status', (e) => {
+                const data = JSON.parse(e.data);
+                setStatus(data.status);
+                if (data.status === 'completed' || data.status === 'failed') {
+                    crawlEventSource.close();
+                }
+            });
+
+            crawlEventSource.onerror = (err) => {
+                console.error('SSE Connection error:', err);
+                crawlEventSource.close();
+            };
+        }
+
+        startBtn.addEventListener('click', async () => {
+            const seedUrl = seedUrlInput.value.trim();
+            const limit = parseInt(limitInput.value) || 50;
+
+            if (!seedUrl) {
+                alert('Please enter a valid target URL.');
+                return;
+            }
+
+            // Reset dashboard state
+            terminal.innerHTML = '';
+            productTableBody.innerHTML = '<tr><td colspan="2" style="text-align: center; color: var(--text-secondary); padding: 2rem;">Discovering catalogs...</td></tr>';
+            productsList = [];
+            pagesVisited.innerText = '0';
+            productsSaved.innerText = '0';
+            downloadBtn.disabled = true;
+            downloadJsonBtn.disabled = true;
+            downloadExcelBtn.disabled = true;
+
+            appendLog('SYSTEM', `Initiating crawl on ${seedUrl} with limit of ${limit} products...`);
+            setStatus('running');
+
+            try {
+                const response = await fetch('/api/crawl', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ seed_url: seedUrl, limit: limit })
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || 'Failed to start crawl');
+                }
+
+                connectSSE();
+
+            } catch (err) {
+                appendLog('ERROR', `Crawl initiation failed: ${err.message}`);
+                setStatus('failed');
+            }
+        });
+
+        resumeBtn.addEventListener('click', async () => {
+            appendLog('SYSTEM', 'Initiating crawl resumption...');
+            setStatus('running');
+
+            try {
+                const response = await fetch('/api/crawl/resume', {
+                    method: 'POST'
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || 'Failed to resume crawl');
+                }
+
+                connectSSE();
+
+            } catch (err) {
+                appendLog('ERROR', `Crawl resumption failed: ${err.message}`);
+                setStatus('stopped');
+            }
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            window.location.href = '/api/crawl/export';
+        });
+
+        downloadJsonBtn.addEventListener('click', () => {
+            window.location.href = '/api/crawl/export/json-zip';
+        });
+
+        downloadExcelBtn.addEventListener('click', () => {
+            window.location.href = '/api/crawl/export/excel';
+        });
+    </script>
+</body>
+</html>

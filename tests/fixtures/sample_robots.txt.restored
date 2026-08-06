@@ -1,0 +1,19 @@
+User-agent: *
+Disallow: /admin/
+Disallow: /checkout/
+Disallow: /cart/
+Disallow: /account/
+Disallow: /login/
+Disallow: /register/
+Disallow: /api/
+Disallow: /search?*
+Allow: /
+
+User-agent: Googlebot
+Disallow: /private/
+Allow: /
+
+Sitemap: https://example-shop.com/sitemap.xml
+Sitemap: https://example-shop.com/sitemap_products.xml
+
+Crawl-delay: 1

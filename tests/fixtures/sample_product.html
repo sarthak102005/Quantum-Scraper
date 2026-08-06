@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Wireless Headphones Pro - Example Shop</title>
+  <meta property="og:title" content="Wireless Headphones Pro">
+  <meta property="og:price:amount" content="149.99">
+  <meta property="og:price:currency" content="USD">
+  <meta property="og:availability" content="instock">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Product",
+    "name": "Wireless Headphones Pro",
+    "description": "Premium noise-cancelling wireless headphones with 40-hour battery life.",
+    "sku": "WHP-001",
+    "brand": {
+      "@type": "Brand",
+      "name": "SoundMax"
+    },
+    "image": [
+      "https://example-shop.com/images/headphones-front.jpg",
+      "https://example-shop.com/images/headphones-side.jpg"
+    ],
+    "offers": {
+      "@type": "Offer",
+      "priceCurrency": "USD",
+      "price": "149.99",
+      "availability": "https://schema.org/InStock",
+      "seller": {
+        "@type": "Organization",
+        "name": "Example Shop"
+      }
+    },
+    "aggregateRating": {
+      "@type": "AggregateRating",
+      "ratingValue": "4.7",
+      "reviewCount": "1243"
+    }
+  }
+  </script>
+</head>
+<body>
+
+<nav class="breadcrumb">
+  <a href="/">Home</a> &gt;
+  <a href="/category/electronics">Electronics</a> &gt;
+  <span>Wireless Headphones Pro</span>
+</nav>
+
+<main class="product-page">
+  <div class="product-gallery">
+    <img src="/images/headphones-front.jpg" alt="Wireless Headphones Pro - Front view">
+    <img src="/images/headphones-side.jpg" alt="Wireless Headphones Pro - Side view">
+  </div>
+
+  <div class="product-info">
+    <h1 class="product-title">Wireless Headphones Pro</h1>
+    <span class="brand" itemprop="brand">SoundMax</span>
+    <span class="sku">SKU: WHP-001</span>
+
+    <div class="pricing">
+      <span class="price">$149.99</span>
+      <span class="original-price">$199.99</span>
+      <span class="discount">25% OFF</span>
+    </div>
+
+    <div class="availability in-stock">
+      <span>In Stock</span>
+      <span class="stock-count">48 units left</span>
+    </div>
+
+    <div class="variants">
+      <label>Color:</label>
+      <button class="variant-btn active" data-sku="WHP-001-BLK">Black</button>
+      <button class="variant-btn" data-sku="WHP-001-WHT">White</button>
+      <button class="variant-btn" data-sku="WHP-001-BLU">Blue</button>
+    </div>
+
+    <button class="add-to-cart" id="add-to-cart-btn">Add to Cart</button>
+    <button class="buy-now">Buy Now</button>
+
+    <div class="product-description">
+      <h2>Description</h2>
+      <p>Premium noise-cancelling wireless headphones with 40-hour battery life.</p>
+      <p>Experience crystal-clear audio with advanced active noise cancellation technology.</p>
+    </div>
+
+    <table class="specifications">
+      <tr><th>Driver Size</th><td>40mm</td></tr>
+      <tr><th>Frequency Response</th><td>20Hz - 20kHz</td></tr>
+      <tr><th>Battery Life</th><td>40 hours</td></tr>
+      <tr><th>Charging Time</th><td>2 hours</td></tr>
+      <tr><th>Weight</th><td>250g</td></tr>
+      <tr><th>Connectivity</th><td>Bluetooth 5.2</td></tr>
+    </table>
+
+    <div class="reviews">
+      <span class="rating">4.7</span>
+      <span class="review-count">1,243 reviews</span>
+    </div>
+  </div>
+</main>
+
+</body>
+</html>
