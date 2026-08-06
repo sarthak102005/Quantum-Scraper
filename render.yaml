@@ -4,10 +4,13 @@ services:
     env: python
     region: oregon
     plan: free
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
-    startCommand: uvicorn web.server:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r requirements.txt
+    # Ensure browsers are available at runtime; some hosts require installing browsers during start.
+    startCommand: bash -lc "python -m playwright install chromium || true && uvicorn web.server:app --host 0.0.0.0 --port $PORT"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: ALLOWED_ORIGINS
-        value: https://quantum-scraper.vercel.app
+        value: https://quantum-scraper-beryl.vercel.app
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /tmp/.playwright
