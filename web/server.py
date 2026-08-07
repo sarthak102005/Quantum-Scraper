@@ -1,4 +1,5 @@
 import asyncio
+import httpx
 import os
 import sys
 
@@ -47,6 +48,31 @@ class CrawlRequest(BaseModel):
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+@app.get("/ping")
+async def ping() -> Dict[str, str]:
+    """Lightweight keep-alive endpoint pinged every 5 s to prevent server sleep."""
+    return {"status": "alive"}
+
+
+async def _keep_alive_loop() -> None:
+    """Pings /ping every 5 seconds so the server never idles on free-tier hosts."""
+    port = int(os.getenv("PORT", 8000))
+    url = f"http://localhost:{port}/ping"
+    await asyncio.sleep(5)  # Small initial delay to let the server fully start
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                await client.get(url, timeout=4.0)
+            except Exception:
+                pass  # Silently ignore failures (e.g., during cold start)
+            await asyncio.sleep(5)
+
+
+@app.on_event("startup")
+async def start_keep_alive():
+    """Launch the keep-alive background task when the app starts."""
+    asyncio.create_task(_keep_alive_loop())
 
 @app.post("/api/crawl")
 async def start_crawl(req: CrawlRequest, background_tasks: BackgroundTasks):
