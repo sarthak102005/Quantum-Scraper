@@ -50,10 +50,33 @@ class PlaywrightMCP:
         """Lazily initialize playwright and browser process."""
         if not self.playwright:
             self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=self.config.browser.headless,
-                args=["--disable-dev-shm-usage", "--no-sandbox"],
-            )
+            try:
+                self.browser = await self.playwright.chromium.launch(
+                    headless=self.config.browser.headless,
+                    args=["--disable-dev-shm-usage", "--no-sandbox"],
+                )
+            except Exception as e:
+                err_msg = str(e)
+                if "Executable doesn't exist" in err_msg or "playwright install" in err_msg or "chrome-headless-shell" in err_msg:
+                    logger.warning("Chromium browser executable missing. Attempting automatic installation...")
+                    import sys
+                    proc = await asyncio.create_subprocess_exec(
+                        sys.executable, "-m", "playwright", "install", "chromium",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    stdout, stderr = await proc.communicate()
+                    if proc.returncode == 0:
+                        logger.info("Playwright Chromium installed successfully. Retrying browser launch...")
+                        self.browser = await self.playwright.chromium.launch(
+                            headless=self.config.browser.headless,
+                            args=["--disable-dev-shm-usage", "--no-sandbox"],
+                        )
+                    else:
+                        logger.error("Failed to auto-install Playwright Chromium", stdout=stdout.decode(), stderr=stderr.decode())
+                        raise e
+                else:
+                    raise e
             logger.info("Playwright browser instance launched")
 
     async def render(

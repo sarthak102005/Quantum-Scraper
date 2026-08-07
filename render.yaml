@@ -10,3 +10,5 @@ services:
         value: https://quantum-scraper-beryl.vercel.app
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /ms-playwright
+      - key: PORT
+        value: 8000
